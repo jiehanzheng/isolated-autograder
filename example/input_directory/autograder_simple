@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+cd /mnt/input/
+
+echo "Compiling..."
+
+# compile student code as ``testing'' user and redirect output to /mnt/output
+runuser -l 'testing' -c 'gcc /mnt/input/student_code.c /mnt/input/testing_code.c -o /mnt/input/testing_code' > /mnt/output/gcc_output 2>&1
+
+echo "Running..."
+
+# run test program as ``testing'' user and redirect output to /mnt/output
+runuser -l 'testing' -c '/mnt/input/testing_code' > /mnt/output/test_output 2>&1
+
+echo "Test script finished."

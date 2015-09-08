@@ -1,0 +1,93 @@
+#!/usr/bin/env python
+
+import docker
+import argparse
+import os
+import sys
+
+import lib.docker_utils as docker_utils
+
+parser = argparse.ArgumentParser(description='Run program in isolation.')
+parser.add_argument('test_manifest', type=argparse.FileType('r'), help='Test manifest file')
+parser.add_argument('input_directory')
+parser.add_argument('output_directory')
+
+args = parser.parse_args()
+
+test_programs = []
+input_directory = os.path.abspath(args.input_directory)
+output_directory = os.path.abspath(args.output_directory)
+
+print "input_directory =", input_directory
+print "output_directory =", output_directory
+
+if not os.path.isdir(input_directory) and os.path.isdir(output_directory):
+  sys.exit("input_directory and output_directory both need to be directories")
+
+# parse test_manifest
+for manifest_line in args.test_manifest:
+  manifest_line = manifest_line.strip()
+  command, arg = manifest_line.split(' ', 1)
+
+  if command == "TEST_PROGRAM":
+    test_programs.append(os.path.join('/mnt/input/', arg))
+
+# 
+# connect to Docker daemon
+docker_tls_config = None
+if os.environ.get('DOCKER_TLS_VERIFY') == "1":
+  docker_tls_config = docker.tls.TLSConfig(
+    client_cert=(os.path.join(os.environ['DOCKER_CERT_PATH'], 'cert.pem'), os.path.join(os.environ['DOCKER_CERT_PATH'], 'key.pem')), 
+    verify=os.path.join(os.environ['DOCKER_CERT_PATH'], 'ca.pem'),
+    assert_hostname=False)
+
+base_url = os.environ.get('DOCKER_HOST').replace('tcp://', 'https://') if docker_tls_config else os.environ.get('DOCKER_HOST')
+docker_client = docker.Client(base_url=base_url, tls=docker_tls_config)
+
+# ensure our instance has already been built
+if len(docker_client.images(name="testing_container")) == 0:
+  sys.exit("Error: could not find a pre-built Docker image (refer to Setup section in README.md for instructions)")
+
+# make new container
+container = docker_client.create_container(
+  image='testing_container',
+  command='bash',
+  stdin_open=True,
+  tty=True,
+  network_disabled=True,
+  volumes=['/mnt/input', '/mnt/output'],
+  host_config=docker.utils.create_host_config(binds={
+      input_directory: {
+          'bind': '/mnt/input',
+          'mode': 'rw',
+      },
+      output_directory: {
+          'bind': '/mnt/output',
+          'mode': 'rw',
+      }}))
+print "Container created: %s" % container
+
+try:
+  docker_client.start(container=container.get('Id'))
+
+  docker_exec = docker_client.exec_create(container=container.get('Id'), cmd='chmod -R go-rwx /mnt/output/')
+  output_generator = docker_client.exec_start(exec_id=docker_exec.get('Id'), stream=True)
+  docker_utils.print_streaming(output_generator)
+
+  for test_program in test_programs:
+    print "Running", test_program
+    docker_exec = docker_client.exec_create(container=container.get('Id'), cmd='chmod +x ' + test_program)
+    output_generator = docker_client.exec_start(exec_id=docker_exec.get('Id'), stream=True)
+    docker_utils.print_streaming(output_generator)
+
+    docker_exec = docker_client.exec_create(container=container.get('Id'), cmd=test_program)
+    output_generator = docker_client.exec_start(exec_id=docker_exec.get('Id'), stream=True)
+    docker_utils.print_streaming(output_generator)
+
+finally:
+  try:
+    docker_client.stop(container=container.get('Id'), timeout=0)
+  except Exception:
+    pass
+
+  docker_client.remove_container(container=container.get('Id'))
